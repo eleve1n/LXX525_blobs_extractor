@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       FIRMWARE_URL:
-        description: 'Direct download URL to firmware file (zip/rar/img)'
+        description: 'Gofile.io URL or direct download URL'
         required: true
         default: 'https://gofile.io/d/4NhqkKso'
       DEVICE_PATH:
@@ -38,81 +38,130 @@ jobs:
       - name: Install Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y android-sdk-libsparse-utils erofs-utils jq python3-pip unzip p7zip-full wget
-          pip3 install gdown
+          sudo apt-get install -y android-sdk-libsparse-utils erofs-utils jq python3-pip unzip p7zip-full wget curl
+          pip3 install requests
           wget -q -O /usr/local/bin/lpunpack https://raw.githubusercontent.com/unix3dgforce/lpunpack/master/lpunpack.py
           chmod +x /usr/local/bin/lpunpack
 
       - name: Download Firmware
+        env:
+          FIRMWARE_URL: ${{ github.event.inputs.FIRMWARE_URL }}
         run: |
           mkdir -p firmware
           cd firmware
-          GOFILE_URL="${{ github.event.inputs.FIRMWARE_URL }}"
-          echo "Downloading from: $GOFILE_URL"
 
-          # Extract content ID from gofile URL (e.g. https://gofile.io/d/4NhqkKso)
-          CONTENT_ID=$(echo "$GOFILE_URL" | grep -oP '(?<=/d/)[A-Za-z0-9]+')
-          if [ -z "$CONTENT_ID" ]; then
-            CONTENT_ID=$(echo "$GOFILE_URL" | grep -oP '(?<=\?c=)[A-Za-z0-9]+')
-          fi
+          # Write Python download script
+          cat > download_gofile.py << 'SCRIPT'
+          import requests
+          import json
+          import sys
+          import re
+          import os
 
-          if [ -n "$CONTENT_ID" ]; then
-            echo "Gofile content ID: $CONTENT_ID"
-            # Get download link from gofile API
-            API_RESPONSE=$(curl -s "https://api.gofile.io/contents/$CONTENT_ID" \
-              -H "Accept: application/json")
-            echo "API response: $API_RESPONSE"
+          url = os.environ.get("FIRMWARE_URL", "")
+          print(f"Downloading from: {url}")
 
-            # Try to extract download link (new API format)
-            DOWNLOAD_URL=$(echo "$API_RESPONSE" | jq -r '.data.children[]? | select(.directLink != null) | .directLink' 2>/dev/null | head -1)
-            if [ -z "$DOWNLOAD_URL" ]; then
-              DOWNLOAD_URL=$(echo "$API_RESPONSE" | jq -r '.data.link? // empty' 2>/dev/null)
-            fi
-            if [ -z "$DOWNLOAD_URL" ]; then
-              DOWNLOAD_URL=$(echo "$API_RESPONSE" | jq -r '.data.downloadPage? // empty' 2>/dev/null)
-            fi
+          # Extract content ID from gofile URL
+          content_id = None
+          if "/d/" in url:
+              content_id = url.split("/d/")[-1].split("/")[0].split("?")[0]
+          elif "?c=" in url:
+              content_id = url.split("?c=")[-1].split("&")[0]
 
-            if [ -n "$DOWNLOAD_URL" ]; then
-              echo "Download URL: $DOWNLOAD_URL"
-              wget -q -O firmware_download "$DOWNLOAD_URL"
-            else
-              echo "Could not get direct link from gofile API, trying guest token..."
-              # Create a guest account to get a token
-              GUEST_RESP=$(curl -s -X POST "https://api.gofile.io/accounts" -H "Accept: application/json")
-              TOKEN=$(echo "$GUEST_RESP" | jq -r '.data.token')
-              echo "Guest token: $TOKEN"
+          if content_id:
+              print(f"Gofile content ID: {content_id}")
 
-              # Get content with token
-              API_RESPONSE=$(curl -s "https://api.gofile.io/contents/$CONTENT_ID?wt=4f6" \
-                -H "Authorization: Bearer $TOKEN" \
-                -H "Accept: application/json")
-              echo "API response with token: $API_RESPONSE"
+              # Create guest account
+              print("Creating guest account...")
+              resp = requests.post("https://api.gofile.io/accounts", headers={"Accept": "application/json"})
+              guest_data = resp.json()
+              token = guest_data.get("data", {}).get("token", "")
+              print(f"Guest token: {token}")
 
-              # Find download link
-              DOWNLOAD_URL=$(echo "$API_RESPONSE" | jq -r '.data.children[]? | select(.link != null) | .link' 2>/dev/null | head -1)
-              if [ -z "$DOWNLOAD_URL" ]; then
-                DOWNLOAD_URL=$(echo "$API_RESPONSE" | jq -r '.data.link? // empty' 2>/dev/null)
-              fi
+              # Try getting content with guest token
+              headers = {
+                  "Accept": "application/json",
+                  "Authorization": f"Bearer {token}"
+              }
+              resp = requests.get(f"https://api.gofile.io/contents/{content_id}", headers=headers)
+              data = resp.json()
+              print(f"API response status: {data.get('status')}")
 
-              if [ -n "$DOWNLOAD_URL" ]; then
-                echo "Download URL: $DOWNLOAD_URL"
-                wget -q -O firmware_download "$DOWNLOAD_URL"
-              else
-                echo "Could not extract download URL from gofile API"
-                exit 1
-              fi
-            fi
-          else
-            # Not a gofile link, try direct download
-            wget -q -O firmware_download "$GOFILE_URL"
-          fi
+              if data.get("status") != "ok":
+                  # Try scraping the website page for wt token
+                  print("Trying website scraping for token...")
+                  resp2 = requests.get(f"https://gofile.io/d/{content_id}")
+                  wt_match = re.search(r'wt:\s*"([^"]+)"', resp2.text)
+                  if wt_match:
+                      wt = wt_match.group(1)
+                      print(f"Found website token: {wt}")
+                      resp = requests.get(f"https://api.gofile.io/contents/{content_id}?wt={wt}", headers=headers)
+                      data = resp.json()
+                      print(f"API response status: {data.get('status')}")
+                  else:
+                      resp = requests.get(f"https://api.gofile.io/contents/{content_id}?wt=4f6")
+                      data = resp.json()
+                      print(f"API response status (no auth): {data.get('status')}")
 
-          if [ ! -s firmware_download ]; then
-            echo "::error::Download failed"
-            exit 1
-          fi
+              if data.get("status") == "ok":
+                  content_data = data.get("data", {})
+                  download_url = None
 
-          echo "Download complete:"
+                  if "link" in content_data:
+                      download_url = content_data["link"]
+                  elif "downloadPage" in content_data:
+                      download_url = content_data["downloadPage"]
+
+                  if not download_url and "children" in content_data:
+                      for child_id, child in content_data["children"].items():
+                          if "link" in child:
+                              download_url = child["link"]
+                              print(f"Found file: {child.get('name', 'unknown')}")
+                              break
+
+                  if download_url:
+                      print(f"Download URL: {download_url}")
+                      print("Downloading (this may take a while for large files)...")
+                      resp = requests.get(download_url, stream=True, allow_redirects=True)
+                      total = int(resp.headers.get('content-length', 0))
+                      downloaded = 0
+                      with open("firmware_download", "wb") as f:
+                          for chunk in resp.iter_content(chunk_size=1024*1024):
+                              if chunk:
+                                  f.write(chunk)
+                                  downloaded += len(chunk)
+                                  if total > 0:
+                                      pct = (downloaded / total) * 100
+                                      print(f"\r  {downloaded/(1024*1024):.1f} MB / {total/(1024*1024):.1f} MB ({pct:.1f}%)", end="", flush=True)
+                      print("\nDownload complete!")
+                  else:
+                      print(f"Could not find download URL in API response")
+                      print(json.dumps(content_data, indent=2)[:1000])
+                      sys.exit(1)
+              else:
+                  print(f"API error: {data}")
+                  sys.exit(1)
+          else:
+              # Direct download URL
+              print(f"Direct download: {url}")
+              resp = requests.get(url, stream=True, allow_redirects=True)
+              with open("firmware_download", "wb") as f:
+                  for chunk in resp.iter_content(chunk_size=1024*1024):
+                      if chunk:
+                          f.write(chunk)
+              print("Download complete!")
+
+          # Verify
+          size = os.path.getsize("firmware_download")
+          print(f"File size: {size / (1024*1024):.1f} MB")
+          if size < 1024:
+              print("ERROR: File too small, download likely failed")
+              sys.exit(1)
+          SCRIPT
+
+          python3 download_gofile.py
+
+          echo "Downloaded file:"
           ls -lh firmware_download
           file firmware_download
 
@@ -193,7 +242,10 @@ jobs:
 
           mkdir -p "$OUTDIR"
 
-          # Extract all HAL binaries from vendor
+          echo "=========================================="
+          echo "Extracting blobs to $OUTDIR"
+          echo "=========================================="
+
           echo ">>> Extracting vendor/bin/hw/ ..."
           if [ -d /mnt/vendor/bin/hw ]; then
             mkdir -p "$OUTDIR/bin/hw"
@@ -201,7 +253,6 @@ jobs:
             echo "  HAL binaries: $(ls "$OUTDIR/bin/hw/" | wc -l)"
           fi
 
-          # Extract vendor/bin (non-HAL)
           echo ">>> Extracting vendor/bin/ ..."
           if [ -d /mnt/vendor/bin ]; then
             mkdir -p "$OUTDIR/bin"
@@ -212,7 +263,6 @@ jobs:
             done
           fi
 
-          # Extract ALL vendor libraries
           echo ">>> Extracting vendor/lib/ and vendor/lib64/ ..."
           for libdir in lib lib64; do
             if [ -d /mnt/vendor/$libdir ]; then
@@ -222,7 +272,6 @@ jobs:
             fi
           done
 
-          # Extract firmware
           echo ">>> Extracting vendor/etc/firmware/ ..."
           if [ -d /mnt/vendor/etc/firmware ]; then
             mkdir -p "$OUTDIR/etc/firmware"
@@ -230,14 +279,12 @@ jobs:
             echo "  Firmware files: $(ls "$OUTDIR/etc/firmware/" | wc -l)"
           fi
 
-          # Extract VINTF manifests
           echo ">>> Extracting vendor/etc/vintf/ ..."
           if [ -d /mnt/vendor/etc/vintf ]; then
             mkdir -p "$OUTDIR/etc/vintf"
             cp -a /mnt/vendor/etc/vintf/* "$OUTDIR/etc/vintf/" 2>/dev/null
           fi
 
-          # Extract audio configs
           echo ">>> Extracting audio configs ..."
           for cfg in audio_device.xml audio_policy_configuration.xml audio_policy_volumes.xml; do
             if [ -f /mnt/vendor/etc/$cfg ]; then
@@ -251,7 +298,6 @@ jobs:
             fi
           done
 
-          # Extract media configs
           echo ">>> Extracting media configs ..."
           for cfg in media_codecs.xml media_codecs_mediatek_audio.xml media_codecs_mediatek_video.xml media_codecs_performance.xml media_profiles.xml; do
             if [ -f /mnt/vendor/etc/$cfg ]; then
@@ -259,7 +305,6 @@ jobs:
             fi
           done
 
-          # Extract sensor configs
           echo ">>> Extracting sensor configs ..."
           for cfg in sensor_config.json sensorlist.txt; do
             if [ -f /mnt/vendor/etc/$cfg ]; then
@@ -267,7 +312,6 @@ jobs:
             fi
           done
 
-          # Extract GPS configs
           echo ">>> Extracting GPS configs ..."
           for cfg in gps.conf gps_param.xml agps_profiles_conf2.xml; do
             if [ -f /mnt/vendor/etc/$cfg ]; then
@@ -275,7 +319,6 @@ jobs:
             fi
           done
 
-          # Extract thermal config
           echo ">>> Extracting thermal configs ..."
           for cfg in thermal_info_config.json thermaloffset.cfg; do
             if [ -f /mnt/vendor/etc/$cfg ]; then
@@ -283,28 +326,24 @@ jobs:
             fi
           done
 
-          # Extract WiFi configs
           echo ">>> Extracting WiFi configs ..."
           if [ -d /mnt/vendor/etc/wifi ]; then
             mkdir -p "$OUTDIR/etc/wifi"
             cp -a /mnt/vendor/etc/wifi/* "$OUTDIR/etc/wifi/" 2>/dev/null
           fi
 
-          # Extract permissions
           echo ">>> Extracting vendor permissions ..."
           if [ -d /mnt/vendor/etc/permissions ]; then
             mkdir -p "$OUTDIR/etc/permissions"
             cp -a /mnt/vendor/etc/permissions/* "$OUTDIR/etc/permissions/" 2>/dev/null
           fi
 
-          # Extract RIL configs
           echo ">>> Extracting RIL configs ..."
           if [ -d /mnt/vendor/etc/ril ]; then
             mkdir -p "$OUTDIR/etc/ril"
             cp -a /mnt/vendor/etc/ril/* "$OUTDIR/etc/ril/" 2>/dev/null
           fi
 
-          # Extract TEE/MiTEE trusted apps
           echo ">>> Extracting TEE/MiTEE trusted apps ..."
           if [ -d /mnt/vendor/mitee ]; then
             mkdir -p "$OUTDIR/mitee"
@@ -312,14 +351,12 @@ jobs:
             echo "  TA files: $(find "$OUTDIR/mitee" -name "*.ta" | wc -l)"
           fi
 
-          # Extract camera configs
           echo ">>> Extracting camera configs ..."
           if [ -d /mnt/vendor/etc/camera ]; then
             mkdir -p "$OUTDIR/etc/camera"
             cp -a /mnt/vendor/etc/camera/* "$OUTDIR/etc/camera/" 2>/dev/null
           fi
 
-          # Extract from ODM
           echo ">>> Extracting ODM blobs ..."
           if [ -d /mnt/odm ]; then
             for libdir in lib lib64; do
@@ -343,7 +380,6 @@ jobs:
             fi
           fi
 
-          # Extract vendor_dlkm kernel modules
           echo ">>> Extracting vendor_dlkm kernel modules ..."
           if [ -d /mnt/vendor_dlkm ]; then
             mkdir -p "$OUTDIR/vendor_dlkm"
@@ -353,7 +389,6 @@ jobs:
             find /mnt/vendor_dlkm -name "*.modules.load" -exec cp --parents {} "$OUTDIR/vendor_dlkm/" \; 2>/dev/null
           fi
 
-          # Extract system_ext blobs
           echo ">>> Extracting system_ext blobs ..."
           if [ -d /mnt/system_ext ]; then
             for libdir in lib lib64; do
@@ -368,13 +403,12 @@ jobs:
             fi
           fi
 
-          # Generate proprietary-files.txt
           echo ">>> Generating proprietary-files.txt ..."
           cd "vendor_blobs/$VENDOR/$DEVICE"
           find . -type f | sed 's|^\./||' | sort > ../../../proprietary-files.txt
           echo "Total blobs: $(wc -l < ../../../proprietary-files.txt)"
 
-          # Generate vendor makefile
+          echo ">>> Generating vendor makefile ..."
           {
             echo "# SPDX-FileCopyrightText: 2024 The LineageOS Project"
             echo "# SPDX-License-Identifier: Apache-2.0"

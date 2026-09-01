@@ -40,15 +40,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y android-sdk-libsparse-utils erofs-utils jq python3-pip unzip p7zip-full wget
           pip3 install gdown
-          # Install lpunpack from GitHub
-          pip3 install git+https://github.com/LonelyFool/lpunpack_and_lpmake.git
+          # Download lpunpack.py directly (standalone script, no install needed)
+          wget -q -O /usr/local/bin/lpunpack https://raw.githubusercontent.com/unix3dgforce/lpunpack/master/lpunpack.py
+          chmod +x /usr/local/bin/lpunpack
 
       - name: Download Firmware from Google Drive
         run: |
           mkdir -p firmware
           cd firmware
           echo "Downloading from Google Drive (file ID: ${{ github.event.inputs.GDRIVE_FILE_ID }})..."
-          gdown --id "${{ github.event.inputs.GDRIVE_FILE_ID }}" -O firmware_download --no-cookies
+          gdown "https://drive.google.com/uc?id=${{ github.event.inputs.GDRIVE_FILE_ID }}" -O firmware_download --no-cookies
           echo "Download complete:"
           ls -lh firmware_download
           file firmware_download

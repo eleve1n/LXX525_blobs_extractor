@@ -71,75 +71,153 @@ jobs:
           if content_id:
               print(f"Gofile content ID: {content_id}")
 
-              # Create guest account
+              # Method 1: Fetch the gofile page and extract download URL from JavaScript
+              print("Fetching gofile page...")
+              session = requests.Session()
+              session.headers.update({
+                  "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              })
+
+              resp = session.get(f"https://gofile.io/d/{content_id}")
+              page_html = resp.text
+
+              # Look for website token (wt) in JavaScript
+              wt = None
+              # Try different patterns for wt
+              for pattern in [
+                  r'wt:\s*"([^"]+)"',
+                  r'"wt":\s*"([^"]+)"',
+                  r"wt:\s*'([^']+)'",
+                  r'websiteToken\s*[=:]\s*["\']([^"\']+)["\']',
+                  r'appdata\.wt\s*=\s*["\']([^"\']+)["\']',
+              ]:
+                  match = re.search(pattern, page_html)
+                  if match:
+                      wt = match.group(1)
+                      print(f"Found website token: {wt}")
+                      break
+
+              # Look for wt in script src files
+              if not wt:
+                  script_srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', page_html)
+                  for src in script_srcs:
+                      if src.startswith("/"):
+                          src = f"https://gofile.io{src}"
+                      elif not src.startswith("http"):
+                          src = f"https://gofile.io/{src}"
+                      try:
+                          resp2 = session.get(src, timeout=10)
+                          for pattern in [
+                              r'wt\s*[:=]\s*["\']([a-zA-Z0-9_-]+)["\']',
+                              r'websiteToken\s*[:=]\s*["\']([^"\']+)["\']',
+                          ]:
+                              match = re.search(pattern, resp2.text)
+                              if match:
+                                  wt = match.group(1)
+                                  print(f"Found website token in {src}: {wt}")
+                                  break
+                          if wt:
+                              break
+                      except:
+                          pass
+
+              # Method 2: Create guest account and try with wt
               print("Creating guest account...")
               resp = requests.post("https://api.gofile.io/accounts", headers={"Accept": "application/json"})
               guest_data = resp.json()
               token = guest_data.get("data", {}).get("token", "")
               print(f"Guest token: {token}")
 
-              # Try getting content with guest token
               headers = {
                   "Accept": "application/json",
-                  "Authorization": f"Bearer {token}"
+                  "Authorization": f"Bearer {token}",
               }
-              resp = requests.get(f"https://api.gofile.io/contents/{content_id}", headers=headers)
-              data = resp.json()
-              print(f"API response status: {data.get('status')}")
 
-              if data.get("status") != "ok":
-                  # Try scraping the website page for wt token
-                  print("Trying website scraping for token...")
-                  resp2 = requests.get(f"https://gofile.io/d/{content_id}")
-                  wt_match = re.search(r'wt:\s*"([^"]+)"', resp2.text)
-                  if wt_match:
-                      wt = wt_match.group(1)
-                      print(f"Found website token: {wt}")
-                      resp = requests.get(f"https://api.gofile.io/contents/{content_id}?wt={wt}", headers=headers)
+              # Try different API calls
+              api_urls = []
+              if wt:
+                  api_urls.append(f"https://api.gofile.io/contents/{content_id}?wt={wt}")
+              api_urls.append(f"https://api.gofile.io/contents/{content_id}")
+              
+              # Also try old API
+              api_urls.append(f"https://apiv2.gofile.io/getContent?contentId={content_id}&token={token}")
+
+              download_url = None
+              for api_url in api_urls:
+                  print(f"Trying API: {api_url}")
+                  try:
+                      resp = requests.get(api_url, headers=headers, timeout=30)
                       data = resp.json()
-                      print(f"API response status: {data.get('status')}")
-                  else:
-                      resp = requests.get(f"https://api.gofile.io/contents/{content_id}?wt=4f6")
-                      data = resp.json()
-                      print(f"API response status (no auth): {data.get('status')}")
-
-              if data.get("status") == "ok":
-                  content_data = data.get("data", {})
-                  download_url = None
-
-                  if "link" in content_data:
-                      download_url = content_data["link"]
-                  elif "downloadPage" in content_data:
-                      download_url = content_data["downloadPage"]
-
-                  if not download_url and "children" in content_data:
-                      for child_id, child in content_data["children"].items():
-                          if "link" in child:
-                              download_url = child["link"]
-                              print(f"Found file: {child.get('name', 'unknown')}")
+                      status = data.get("status", "unknown")
+                      print(f"  Status: {status}")
+                      
+                      if status == "ok":
+                          content_data = data.get("data", {})
+                          
+                          # Try different response formats
+                          if "link" in content_data:
+                              download_url = content_data["link"]
+                          elif "downloadPage" in content_data:
+                              download_url = content_data["downloadPage"]
+                          
+                          if not download_url and "children" in content_data:
+                              for child_id, child in content_data["children"].items():
+                                  if "link" in child:
+                                      download_url = child["link"]
+                                      print(f"  Found file: {child.get('name', 'unknown')}")
+                                      break
+                          
+                          # Also try contents field
+                          if not download_url and "contents" in content_data:
+                              for item in content_data["contents"]:
+                                  if "link" in item:
+                                      download_url = item["link"]
+                                      break
+                          
+                          if download_url:
                               break
+                  except Exception as e:
+                      print(f"  Error: {e}")
 
-                  if download_url:
-                      print(f"Download URL: {download_url}")
-                      print("Downloading (this may take a while for large files)...")
-                      resp = requests.get(download_url, stream=True, allow_redirects=True)
-                      total = int(resp.headers.get('content-length', 0))
-                      downloaded = 0
-                      with open("firmware_download", "wb") as f:
-                          for chunk in resp.iter_content(chunk_size=1024*1024):
-                              if chunk:
-                                  f.write(chunk)
-                                  downloaded += len(chunk)
-                                  if total > 0:
-                                      pct = (downloaded / total) * 100
-                                      print(f"\r  {downloaded/(1024*1024):.1f} MB / {total/(1024*1024):.1f} MB ({pct:.1f}%)", end="", flush=True)
-                      print("\nDownload complete!")
-                  else:
-                      print(f"Could not find download URL in API response")
-                      print(json.dumps(content_data, indent=2)[:1000])
-                      sys.exit(1)
+              # Method 3: Try constructing download URL from server response
+              if not download_url:
+                  print("Trying old API getServer method...")
+                  try:
+                      resp = requests.get("https://api.gofile.io/servers", headers={"Accept": "application/json"})
+                      servers_data = resp.json()
+                      if servers_data.get("status") == "ok":
+                          servers = servers_data.get("data", {}).get("servers", [])
+                          if servers:
+                              server = servers[0].get("name", "store1")
+                              download_url = f"https://{server}.gofile.io/download/{content_id}/firmware"
+                              print(f"Constructed URL: {download_url}")
+                  except:
+                      pass
+
+              if download_url:
+                  print(f"Download URL: {download_url}")
+                  print("Downloading (this may take a while)...")
+                  resp = requests.get(download_url, stream=True, allow_redirects=True, 
+                                     headers={"User-Agent": "Mozilla/5.0"})
+                  total = int(resp.headers.get('content-length', 0))
+                  downloaded = 0
+                  with open("firmware_download", "wb") as f:
+                      for chunk in resp.iter_content(chunk_size=1024*1024):
+                          if chunk:
+                              f.write(chunk)
+                              downloaded += len(chunk)
+                              if total > 0:
+                                  pct = (downloaded / total) * 100
+                                  print(f"\r  {downloaded/(1024*1024):.1f} MB / {total/(1024*1024):.1f} MB ({pct:.1f}%)", end="", flush=True)
+                  print("\nDownload complete!")
               else:
-                  print(f"API error: {data}")
+                  print("ERROR: Could not find download URL from gofile")
+                  print("The gofile API requires premium for direct downloads.")
+                  print("Please upload the firmware to a different service:")
+                  print("  - file.io")
+                  print("  - transfer.sh")
+                  print("  - Or split super.img into parts and upload as GitHub release assets")
                   sys.exit(1)
           else:
               # Direct download URL

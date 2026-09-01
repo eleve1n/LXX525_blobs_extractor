@@ -6,7 +6,7 @@ on:
       GDRIVE_FILE_ID:
         description: 'Google Drive file ID for the firmware (full firmware zip/rar)'
         required: true
-        default: '1aMoFCF5R2OZvO50ew5FxgRuDlaio6-Wa'
+        default: '1J29PUYkTk4UT9nYUiNKMWW4ULAh7Lk3p'
       DEVICE_PATH:
         description: 'Device codename (e.g. LXX525)'
         required: true

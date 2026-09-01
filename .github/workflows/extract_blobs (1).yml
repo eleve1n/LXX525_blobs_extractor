@@ -38,8 +38,11 @@ jobs:
       - name: Install Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y simg2img erofs-utils jq python3-pip unzip p7zip-full wget
-          pip3 install lpunpack gdown
+          sudo apt-get install -y android-sdk-libsparse-utils erofs-utils jq python3-pip unzip p7zip-full wget
+          pip3 install gdown
+          # Install lpunpack from GitHub
+          git clone https://github.com/unix3dgforce/lpunpack /tmp/lpunpack
+          cd /tmp/lpunpack && pip3 install . && cd -
 
       - name: Download Firmware from Google Drive
         run: |

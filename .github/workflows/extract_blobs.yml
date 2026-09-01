@@ -6,7 +6,7 @@ on:
       GDRIVE_FILE_ID:
         description: 'Google Drive file ID for the firmware (full firmware zip/rar)'
         required: true
-        default: '1J29PUYkTk4UT9nYUiNKMWW4ULAh7Lk3p'
+        default: '1aMoFCF5R2OZvO50ew5FxgRuDlaio6-Wa'
       DEVICE_PATH:
         description: 'Device codename (e.g. LXX525)'
         required: true
@@ -48,55 +48,8 @@ jobs:
         run: |
           mkdir -p firmware
           cd firmware
-          FILE_ID="${{ github.event.inputs.GDRIVE_FILE_ID }}"
-          echo "Downloading from Google Drive (file ID: $FILE_ID)..."
-
-          # Try gdown first with fuzzy matching
-          gdown "https://drive.google.com/uc?id=$FILE_ID" -O firmware_download --fuzzy --no-cookies 2>/dev/null
-
-          # If gdown failed, try wget with cookie handling
-          if [ ! -s firmware_download ]; then
-            echo "gdown failed, trying wget with cookies..."
-            rm -f firmware_download
-            COOKIE_FILE=$(mktemp)
-            # Get confirmation token
-            CONFIRM=$(wget --quiet --save-cookies "$COOKIE_FILE" --keep-session-cookies \
-              "https://drive.google.com/uc?export=download&id=$FILE_ID" -O- \
-              | grep -o 'confirm=[A-Za-z0-9_-]*' | head -1 | cut -d= -f2)
-            if [ -z "$CONFIRM" ]; then
-              CONFIRM=$(wget --quiet --save-cookies "$COOKIE_FILE" --keep-session-cookies \
-                "https://docs.google.com/uc?export=download&id=$FILE_ID" -O- \
-                | grep -o 'confirm=[A-Za-z0-9_-]*' | head -1 | cut -d= -f2)
-            fi
-            if [ -n "$CONFIRM" ]; then
-              echo "Got confirmation token: $CONFIRM"
-              wget --load-cookies "$COOKIE_FILE" \
-                "https://drive.google.com/uc?export=download&confirm=$CONFIRM&id=$FILE_ID" \
-                -O firmware_download
-            else
-              # Try direct download with UUID parameter
-              echo "Trying UUID-based download..."
-              wget --load-cookies "$COOKIE_FILE" \
-                "https://drive.google.com/uc?export=download&id=$FILE_ID&confirm=t" \
-                -O firmware_download
-            fi
-            rm -f "$COOKIE_FILE"
-          fi
-
-          # If still failed, try curl
-          if [ ! -s firmware_download ]; then
-            echo "wget failed, trying curl..."
-            rm -f firmware_download
-            curl -L -o firmware_download \
-              "https://drive.google.com/uc?export=download&id=$FILE_ID&confirm=t"
-          fi
-
-          if [ ! -s firmware_download ]; then
-            echo "::error::All download methods failed"
-            echo "Try uploading to gofile.io or another service and use a direct URL"
-            exit 1
-          fi
-
+          echo "Downloading from Google Drive (file ID: ${{ github.event.inputs.GDRIVE_FILE_ID }})..."
+          gdown "https://drive.google.com/uc?id=${{ github.event.inputs.GDRIVE_FILE_ID }}" -O firmware_download --no-cookies
           echo "Download complete:"
           ls -lh firmware_download
           file firmware_download

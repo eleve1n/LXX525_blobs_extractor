@@ -1,0 +1,419 @@
+name: Extract Vendor Blobs
+
+on:
+  workflow_dispatch:
+    inputs:
+      GDRIVE_FILE_ID:
+        description: 'Google Drive file ID for the firmware (full firmware zip/rar)'
+        required: true
+        default: '1aMoFCF5R2OZvO50ew5FxgRuDlaio6-Wa'
+      DEVICE_PATH:
+        description: 'Device codename (e.g. LXX525)'
+        required: true
+        default: 'LXX525'
+      VENDOR_NAME:
+        description: 'Vendor/brand folder name (e.g. lava)'
+        required: true
+        default: 'lava'
+
+jobs:
+  extract:
+    name: Extract Blobs from Firmware
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
+      - name: Check Out
+        uses: actions/checkout@v4
+
+      - name: Install Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y android-sdk-libsparse-utils erofs-utils jq python3-pip unzip p7zip-full wget
+          pip3 install lpunpack gdown
+
+      - name: Download Firmware from Google Drive
+        run: |
+          mkdir -p firmware
+          cd firmware
+          echo "Downloading from Google Drive (file ID: ${{ github.event.inputs.GDRIVE_FILE_ID }})..."
+          gdown --id "${{ github.event.inputs.GDRIVE_FILE_ID }}" -O firmware_download --no-cookies
+          echo "Download complete:"
+          ls -lh firmware_download
+          file firmware_download
+
+      - name: Extract Archive
+        run: |
+          cd firmware
+          # Check if it's a zip
+          if file firmware_download | grep -qi "zip"; then
+            echo "Extracting ZIP..."
+            unzip -o firmware_download
+            rm firmware_download
+          # Check if it's a RAR
+          elif file firmware_download | grep -qi "rar"; then
+            echo "Extracting RAR..."
+            7z x firmware_download
+            rm firmware_download
+          # Check if it's 7z
+          elif file firmware_download | grep -qi "7z"; then
+            echo "Extracting 7z..."
+            7z x firmware_download
+            rm firmware_download
+          else
+            echo "Not an archive, assuming raw images..."
+            mv firmware_download super.img
+          fi
+
+          echo "=== Files in firmware directory ==="
+          find . -maxdepth 1 -type f -exec ls -lh {} \;
+
+          # Find super.img
+          SUPER_IMG=$(find . -name "super.img" | head -1)
+          if [ -z "$SUPER_IMG" ]; then
+            echo "::error::super.img not found in firmware dump"
+            echo "Available files:"
+            find . -name "*.img" -exec ls -lh {} \;
+            exit 1
+          fi
+          echo "Found super.img at: $SUPER_IMG"
+
+      - name: Unpack Super Partition
+        run: |
+          mkdir -p super_out
+          SUPER_IMG=$(find firmware -name "super.img" | head -1)
+
+          # Convert sparse image to raw if needed
+          echo "Converting super.img..."
+          simg2img "$SUPER_IMG" super_out/super_raw.img 2>/dev/null || cp "$SUPER_IMG" super_out/super_raw.img
+
+          # Unpack into sub-partitions
+          echo "Unpacking super partition..."
+          cd super_out
+          lpunpack super_raw.img
+          rm super_raw.img
+
+          echo "=== Unpacked partitions ==="
+          ls -lh *.img
+
+      - name: Mount Partitions
+        run: |
+          mkdir -p /mnt/vendor /mnt/odm /mnt/system /mnt/product /mnt/system_ext /mnt/vendor_dlkm
+
+          # Mount erofs partitions
+          for part in vendor odm vendor_dlkm; do
+            if [ -f super_out/$part.img ]; then
+              echo "Mounting $part (erofs)..."
+              sudo mount -t erofs -o ro,loop super_out/$part.img /mnt/$part 2>/dev/null || \
+              sudo mount -o ro,loop super_out/$part.img /mnt/$part
+              echo "$part contents:"
+              ls /mnt/$part | head -5
+            else
+              echo "WARNING: $part.img not found"
+            fi
+          done
+
+          # Mount ext4 partitions
+          for part in system product system_ext; do
+            if [ -f super_out/$part.img ]; then
+              echo "Mounting $part (ext4)..."
+              sudo mount -t ext4 -o ro,loop super_out/$part.img /mnt/$part 2>/dev/null || \
+              sudo mount -o ro,loop super_out/$part.img /mnt/$part
+              echo "$part contents:"
+              ls /mnt/$part | head -5
+            else
+              echo "WARNING: $part.img not found"
+            fi
+          done
+
+      - name: Extract Blobs
+        run: |
+          DEVICE="${{ github.event.inputs.DEVICE_PATH }}"
+          VENDOR="${{ github.event.inputs.VENDOR_NAME }}"
+          OUTDIR="vendor_blobs/$VENDOR/$DEVICE"
+
+          mkdir -p "$OUTDIR"
+
+          echo "=========================================="
+          echo "Extracting blobs to $OUTDIR"
+          echo "=========================================="
+
+          # --- Extract all HAL binaries from vendor ---
+          echo ">>> Extracting vendor/bin/hw/ ..."
+          if [ -d /mnt/vendor/bin/hw ]; then
+            mkdir -p "$OUTDIR/bin/hw"
+            cp -a /mnt/vendor/bin/hw/* "$OUTDIR/bin/hw/" 2>/dev/null
+            echo "  HAL binaries: $(ls "$OUTDIR/bin/hw/" | wc -l)"
+          fi
+
+          # --- Extract vendor/bin (non-HAL) ---
+          echo ">>> Extracting vendor/bin/ ..."
+          if [ -d /mnt/vendor/bin ]; then
+            mkdir -p "$OUTDIR/bin"
+            # Only extract known proprietary binaries
+            for bin in tee-supplicant miteelog mtkfusionrild fuelgauged fuelgauged_nvram; do
+              if [ -f /mnt/vendor/bin/$bin ]; then
+                cp /mnt/vendor/bin/$bin "$OUTDIR/bin/"
+              fi
+            done
+          fi
+
+          # --- Extract ALL vendor libraries ---
+          echo ">>> Extracting vendor/lib/ and vendor/lib64/ ..."
+          for libdir in lib lib64; do
+            if [ -d /mnt/vendor/$libdir ]; then
+              mkdir -p "$OUTDIR/$libdir"
+              # Copy all .so files from vendor
+              find /mnt/vendor/$libdir -name "*.so" -exec cp --parents {} "$OUTDIR/" \; 2>/dev/null
+              echo "  $libdir: $(find "$OUTDIR/$libdir" -name "*.so" | wc -l) libraries"
+            fi
+          done
+
+          # --- Extract firmware ---
+          echo ">>> Extracting vendor/etc/firmware/ ..."
+          if [ -d /mnt/vendor/etc/firmware ]; then
+            mkdir -p "$OUTDIR/etc/firmware"
+            cp -a /mnt/vendor/etc/firmware/* "$OUTDIR/etc/firmware/" 2>/dev/null
+            echo "  Firmware files: $(ls "$OUTDIR/etc/firmware/" | wc -l)"
+          fi
+
+          # --- Extract VINTF manifests ---
+          echo ">>> Extracting vendor/etc/vintf/ ..."
+          if [ -d /mnt/vendor/etc/vintf ]; then
+            mkdir -p "$OUTDIR/etc/vintf"
+            cp -a /mnt/vendor/etc/vintf/* "$OUTDIR/etc/vintf/" 2>/dev/null
+            echo "  VINTF files: $(find "$OUTDIR/etc/vintf" -type f | wc -l)"
+          fi
+
+          # --- Extract audio configs ---
+          echo ">>> Extracting audio configs ..."
+          for cfg in audio_device.xml audio_policy_configuration.xml audio_policy_volumes.xml; do
+            if [ -f /mnt/vendor/etc/$cfg ]; then
+              cp /mnt/vendor/etc/$cfg "$OUTDIR/etc/"
+            fi
+          done
+          for dir in audio_param params; do
+            if [ -d /mnt/vendor/etc/$dir ]; then
+              mkdir -p "$OUTDIR/etc/$dir"
+              cp -a /mnt/vendor/etc/$dir/* "$OUTDIR/etc/$dir/" 2>/dev/null
+            fi
+          done
+
+          # --- Extract media configs ---
+          echo ">>> Extracting media configs ..."
+          for cfg in media_codecs.xml media_codecs_mediatek_audio.xml media_codecs_mediatek_video.xml media_codecs_performance.xml media_profiles.xml; do
+            if [ -f /mnt/vendor/etc/$cfg ]; then
+              cp /mnt/vendor/etc/$cfg "$OUTDIR/etc/"
+            fi
+          done
+
+          # --- Extract sensor configs ---
+          echo ">>> Extracting sensor configs ..."
+          for cfg in sensor_config.json sensorlist.txt; do
+            if [ -f /mnt/vendor/etc/$cfg ]; then
+              cp /mnt/vendor/etc/$cfg "$OUTDIR/etc/"
+            fi
+          done
+
+          # --- Extract GPS configs ---
+          echo ">>> Extracting GPS configs ..."
+          for cfg in gps.conf gps_param.xml agps_profiles_conf2.xml; do
+            if [ -f /mnt/vendor/etc/$cfg ]; then
+              cp /mnt/vendor/etc/$cfg "$OUTDIR/etc/"
+            fi
+          done
+
+          # --- Extract thermal config ---
+          echo ">>> Extracting thermal configs ..."
+          for cfg in thermal_info_config.json thermaloffset.cfg; do
+            if [ -f /mnt/vendor/etc/$cfg ]; then
+              cp /mnt/vendor/etc/$cfg "$OUTDIR/etc/"
+            fi
+          done
+
+          # --- Extract WiFi configs ---
+          echo ">>> Extracting WiFi configs ..."
+          if [ -d /mnt/vendor/etc/wifi ]; then
+            mkdir -p "$OUTDIR/etc/wifi"
+            cp -a /mnt/vendor/etc/wifi/* "$OUTDIR/etc/wifi/" 2>/dev/null
+          fi
+
+          # --- Extract permissions ---
+          echo ">>> Extracting vendor permissions ..."
+          if [ -d /mnt/vendor/etc/permissions ]; then
+            mkdir -p "$OUTDIR/etc/permissions"
+            cp -a /mnt/vendor/etc/permissions/* "$OUTDIR/etc/permissions/" 2>/dev/null
+            echo "  Permission files: $(ls "$OUTDIR/etc/permissions/" | wc -l)"
+          fi
+
+          # --- Extract RIL configs ---
+          echo ">>> Extracting RIL configs ..."
+          if [ -d /mnt/vendor/etc/ril ]; then
+            mkdir -p "$OUTDIR/etc/ril"
+            cp -a /mnt/vendor/etc/ril/* "$OUTDIR/etc/ril/" 2>/dev/null
+          fi
+
+          # --- Extract TEE/MiTEE trusted apps ---
+          echo ">>> Extracting TEE/MiTEE trusted apps ..."
+          if [ -d /mnt/vendor/mitee ]; then
+            mkdir -p "$OUTDIR/mitee"
+            cp -a /mnt/vendor/mitee/* "$OUTDIR/mitee/" 2>/dev/null
+            echo "  TA files: $(find "$OUTDIR/mitee" -name "*.ta" | wc -l)"
+          fi
+
+          # --- Extract camera configs ---
+          echo ">>> Extracting camera configs ..."
+          if [ -d /mnt/vendor/etc/camera ]; then
+            mkdir -p "$OUTDIR/etc/camera"
+            cp -a /mnt/vendor/etc/camera/* "$OUTDIR/etc/camera/" 2>/dev/null
+          fi
+
+          # --- Extract from ODM ---
+          echo ">>> Extracting ODM blobs ..."
+          if [ -d /mnt/odm ]; then
+            for libdir in lib lib64; do
+              if [ -d /mnt/odm/$libdir ]; then
+                mkdir -p "$OUTDIR/odm/$libdir"
+                find /mnt/odm/$libdir -name "*.so" -exec cp --parents {} "$OUTDIR/odm/" \; 2>/dev/null
+              fi
+            done
+            if [ -d /mnt/odm/bin/hw ]; then
+              mkdir -p "$OUTDIR/odm/bin/hw"
+              cp -a /mnt/odm/bin/hw/* "$OUTDIR/odm/bin/hw/" 2>/dev/null
+            fi
+            if [ -d /mnt/odm/etc/vintf ]; then
+              mkdir -p "$OUTDIR/odm/etc/vintf"
+              cp -a /mnt/odm/etc/vintf/* "$OUTDIR/odm/etc/vintf/" 2>/dev/null
+            fi
+            if [ -d /mnt/odm/etc ]; then
+              mkdir -p "$OUTDIR/odm/etc"
+              cp -a /mnt/odm/etc/*.xml "$OUTDIR/odm/etc/" 2>/dev/null
+              cp -a /mnt/odm/etc/*.json "$OUTDIR/odm/etc/" 2>/dev/null
+            fi
+          fi
+
+          # --- Extract vendor_dlkm kernel modules ---
+          echo ">>> Extracting vendor_dlkm kernel modules ..."
+          if [ -d /mnt/vendor_dlkm ]; then
+            mkdir -p "$OUTDIR/vendor_dlkm"
+            find /mnt/vendor_dlkm -name "*.ko" -exec cp --parents {} "$OUTDIR/vendor_dlkm/" \; 2>/dev/null
+            echo "  Kernel modules: $(find "$OUTDIR/vendor_dlkm" -name '*.ko' | wc -l)"
+
+            # Copy modules.load files
+            find /mnt/vendor_dlkm -name "modules.load" -exec cp --parents {} "$OUTDIR/vendor_dlkm/" \; 2>/dev/null
+            find /mnt/vendor_dlkm -name "*.modules.load" -exec cp --parents {} "$OUTDIR/vendor_dlkm/" \; 2>/dev/null
+          fi
+
+          # --- Extract system_ext blobs ---
+          echo ">>> Extracting system_ext blobs ..."
+          if [ -d /mnt/system_ext ]; then
+            for libdir in lib lib64; do
+              if [ -d /mnt/system_ext/$libdir ]; then
+                mkdir -p "$OUTDIR/system_ext/$libdir"
+                find /mnt/system_ext/$libdir -name "*.so" -exec cp --parents {} "$OUTDIR/system_ext/" \; 2>/dev/null
+              fi
+            done
+            if [ -d /mnt/system_ext/etc ]; then
+              mkdir -p "$OUTDIR/system_ext/etc"
+              cp -a /mnt/system_ext/etc/*.xml "$OUTDIR/system_ext/etc/" 2>/dev/null
+            fi
+          fi
+
+          # --- Generate proprietary-files.txt ---
+          echo ">>> Generating proprietary-files.txt ..."
+          cd "vendor_blobs/$VENDOR/$DEVICE"
+          find . -type f | sed 's|^\./||' | sort > ../../../proprietary-files.txt
+          echo "Total blobs: $(wc -l < ../../../proprietary-files.txt)"
+
+          # --- Generate vendor makefile ---
+          {
+            echo "# SPDX-FileCopyrightText: 2024 The LineageOS Project"
+            echo "# SPDX-License-Identifier: Apache-2.0"
+            echo ""
+            echo "PRODUCT_PACKAGES += \\"
+            echo "    $DEVICE-vendor"
+          } > ../../../"$DEVICE-vendor.mk"
+
+          # --- Summary ---
+          echo ""
+          echo "=========================================="
+          echo "EXTRACTION COMPLETE"
+          echo "=========================================="
+          echo "Total extracted files: $(find "$OUTDIR" -type f | wc -l)"
+          echo "Total size: $(du -sh "$OUTDIR" | cut -f1)"
+          echo ""
+          echo "Directory structure:"
+          find "$OUTDIR" -maxdepth 2 -type d | head -20
+          echo ""
+          echo "proprietary-files.txt entries: $(wc -l < ../../../proprietary-files.txt)"
+          echo "First 20 entries:"
+          head -20 ../../../proprietary-files.txt
+
+      - name: Unmount Partitions
+        if: always()
+        run: |
+          for mnt in /mnt/vendor /mnt/odm /mnt/system /mnt/product /mnt/system_ext /mnt/vendor_dlkm; do
+            sudo umount $mnt 2>/dev/null || true
+          done
+
+      - name: Create Vendor Repo Zip
+        run: |
+          cd vendor_blobs
+          zip -r ../vendor_${{ github.event.inputs.DEVICE_PATH }}.zip .
+          ls -lh ../vendor_${{ github.event.inputs.DEVICE_PATH }}.zip
+
+      - name: Upload Vendor Blobs Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vendor_${{ github.event.inputs.DEVICE_PATH }}
+          path: vendor_${{ github.event.inputs.DEVICE_PATH }}.zip
+          retention-days: 30
+
+      - name: Upload proprietary-files.txt
+        uses: actions/upload-artifact@v4
+        with:
+          name: proprietary_files_${{ github.event.inputs.DEVICE_PATH }}
+          path: proprietary-files.txt
+          retention-days: 30
+
+      - name: Upload vendor.mk
+        uses: actions/upload-artifact@v4
+        with:
+          name: vendor_mk_${{ github.event.inputs.DEVICE_PATH }}
+          path: ${{ github.event.inputs.DEVICE_PATH }}-vendor.mk
+          retention-days: 30
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            vendor_${{ github.event.inputs.DEVICE_PATH }}.zip
+            proprietary-files.txt
+            ${{ github.event.inputs.DEVICE_PATH }}-vendor.mk
+          name: Vendor blobs for ${{ github.event.inputs.VENDOR_NAME }} ${{ github.event.inputs.DEVICE_PATH }}
+          tag_name: blobs-${{ github.event.inputs.DEVICE_PATH }}-${{ github.run_id }}
+          body: |
+            ## Vendor blobs for ${{ github.event.inputs.VENDOR_NAME }} ${{ github.event.inputs.DEVICE_PATH }}
+
+            Extracted from stock firmware via GitHub Actions.
+
+            ### Contents:
+            - `vendor_${{ github.event.inputs.DEVICE_PATH }}.zip` — All vendor blobs (place in `vendor/lava/LXX525/`)
+            - `proprietary-files.txt` — File list (place in `device/lava/LXX525/`)
+            - `${{ github.event.inputs.DEVICE_PATH }}-vendor.mk` — Vendor makefile
+
+            ### Usage:
+            1. Unzip `vendor_${{ github.event.inputs.DEVICE_PATH }}.zip` into `vendor/lava/LXX525/`
+            2. Copy `proprietary-files.txt` to `device/lava/LXX525/`
+            3. Copy `LXX525-vendor.mk` to `vendor/lava/LXX525/LXX525-vendor.mk`
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

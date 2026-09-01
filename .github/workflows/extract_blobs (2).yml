@@ -39,7 +39,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y android-sdk-libsparse-utils erofs-utils jq python3-pip unzip p7zip-full wget
-          pip3 install lpunpack gdown
+          pip3 install gdown
+          # Download lpunpack.py directly (standalone script, no install needed)
+          wget -q -O /usr/local/bin/lpunpack https://raw.githubusercontent.com/unix3dgforce/lpunpack/master/lpunpack.py
+          chmod +x /usr/local/bin/lpunpack
 
       - name: Download Firmware from Google Drive
         run: |

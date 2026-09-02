@@ -3,10 +3,6 @@ name: Extract Vendor Blobs
 on:
   workflow_dispatch:
     inputs:
-      FIRMWARE_URL:
-        description: 'Gofile.io URL or direct download URL'
-        required: true
-        default: 'https://gofile.io/d/4NhqkKso'
       DEVICE_PATH:
         description: 'Device codename (e.g. LXX525)'
         required: true
@@ -18,7 +14,7 @@ on:
 
 jobs:
   extract:
-    name: Extract Blobs from Firmware
+    name: Extract Blobs from Partitions
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -38,277 +34,53 @@ jobs:
       - name: Install Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y android-sdk-libsparse-utils erofs-utils jq python3-pip unzip p7zip-full wget curl
-          pip3 install requests
-          wget -q -O /usr/local/bin/lpunpack https://raw.githubusercontent.com/unix3dgforce/lpunpack/master/lpunpack.py
-          chmod +x /usr/local/bin/lpunpack
+          sudo apt-get install -y erofs-utils jq python3-pip unzip p7zip-full wget curl
 
-      - name: Download Firmware
-        env:
-          FIRMWARE_URL: ${{ github.event.inputs.FIRMWARE_URL }}
+      - name: Download Partition Images from Release
         run: |
-          mkdir -p firmware
-          cd firmware
-
-          # Write Python download script
-          cat > download_gofile.py << 'SCRIPT'
-          import requests
-          import json
-          import sys
-          import re
-          import os
-
-          url = os.environ.get("FIRMWARE_URL", "")
-          print(f"Downloading from: {url}")
-
-          # Extract content ID from gofile URL
-          content_id = None
-          if "/d/" in url:
-              content_id = url.split("/d/")[-1].split("/")[0].split("?")[0]
-          elif "?c=" in url:
-              content_id = url.split("?c=")[-1].split("&")[0]
-
-          if content_id:
-              print(f"Gofile content ID: {content_id}")
-
-              # Method 1: Fetch the gofile page and extract download URL from JavaScript
-              print("Fetching gofile page...")
-              session = requests.Session()
-              session.headers.update({
-                  "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-              })
-
-              resp = session.get(f"https://gofile.io/d/{content_id}")
-              page_html = resp.text
-
-              # Look for website token (wt) in JavaScript
-              wt = None
-              # Try different patterns for wt
-              for pattern in [
-                  r'wt:\s*"([^"]+)"',
-                  r'"wt":\s*"([^"]+)"',
-                  r"wt:\s*'([^']+)'",
-                  r'websiteToken\s*[=:]\s*["\']([^"\']+)["\']',
-                  r'appdata\.wt\s*=\s*["\']([^"\']+)["\']',
-              ]:
-                  match = re.search(pattern, page_html)
-                  if match:
-                      wt = match.group(1)
-                      print(f"Found website token: {wt}")
-                      break
-
-              # Look for wt in script src files
-              if not wt:
-                  script_srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', page_html)
-                  for src in script_srcs:
-                      if src.startswith("/"):
-                          src = f"https://gofile.io{src}"
-                      elif not src.startswith("http"):
-                          src = f"https://gofile.io/{src}"
-                      try:
-                          resp2 = session.get(src, timeout=10)
-                          for pattern in [
-                              r'wt\s*[:=]\s*["\']([a-zA-Z0-9_-]+)["\']',
-                              r'websiteToken\s*[:=]\s*["\']([^"\']+)["\']',
-                          ]:
-                              match = re.search(pattern, resp2.text)
-                              if match:
-                                  wt = match.group(1)
-                                  print(f"Found website token in {src}: {wt}")
-                                  break
-                          if wt:
-                              break
-                      except:
-                          pass
-
-              # Method 2: Create guest account and try with wt
-              print("Creating guest account...")
-              resp = requests.post("https://api.gofile.io/accounts", headers={"Accept": "application/json"})
-              guest_data = resp.json()
-              token = guest_data.get("data", {}).get("token", "")
-              print(f"Guest token: {token}")
-
-              headers = {
-                  "Accept": "application/json",
-                  "Authorization": f"Bearer {token}",
-              }
-
-              # Try different API calls
-              api_urls = []
-              if wt:
-                  api_urls.append(f"https://api.gofile.io/contents/{content_id}?wt={wt}")
-              api_urls.append(f"https://api.gofile.io/contents/{content_id}")
-              
-              # Also try old API
-              api_urls.append(f"https://apiv2.gofile.io/getContent?contentId={content_id}&token={token}")
-
-              download_url = None
-              for api_url in api_urls:
-                  print(f"Trying API: {api_url}")
-                  try:
-                      resp = requests.get(api_url, headers=headers, timeout=30)
-                      data = resp.json()
-                      status = data.get("status", "unknown")
-                      print(f"  Status: {status}")
-                      
-                      if status == "ok":
-                          content_data = data.get("data", {})
-                          
-                          # Try different response formats
-                          if "link" in content_data:
-                              download_url = content_data["link"]
-                          elif "downloadPage" in content_data:
-                              download_url = content_data["downloadPage"]
-                          
-                          if not download_url and "children" in content_data:
-                              for child_id, child in content_data["children"].items():
-                                  if "link" in child:
-                                      download_url = child["link"]
-                                      print(f"  Found file: {child.get('name', 'unknown')}")
-                                      break
-                          
-                          # Also try contents field
-                          if not download_url and "contents" in content_data:
-                              for item in content_data["contents"]:
-                                  if "link" in item:
-                                      download_url = item["link"]
-                                      break
-                          
-                          if download_url:
-                              break
-                  except Exception as e:
-                      print(f"  Error: {e}")
-
-              # Method 3: Try constructing download URL from server response
-              if not download_url:
-                  print("Trying old API getServer method...")
-                  try:
-                      resp = requests.get("https://api.gofile.io/servers", headers={"Accept": "application/json"})
-                      servers_data = resp.json()
-                      if servers_data.get("status") == "ok":
-                          servers = servers_data.get("data", {}).get("servers", [])
-                          if servers:
-                              server = servers[0].get("name", "store1")
-                              download_url = f"https://{server}.gofile.io/download/{content_id}/firmware"
-                              print(f"Constructed URL: {download_url}")
-                  except:
-                      pass
-
-              if download_url:
-                  print(f"Download URL: {download_url}")
-                  print("Downloading (this may take a while)...")
-                  resp = requests.get(download_url, stream=True, allow_redirects=True, 
-                                     headers={"User-Agent": "Mozilla/5.0"})
-                  total = int(resp.headers.get('content-length', 0))
-                  downloaded = 0
-                  with open("firmware_download", "wb") as f:
-                      for chunk in resp.iter_content(chunk_size=1024*1024):
-                          if chunk:
-                              f.write(chunk)
-                              downloaded += len(chunk)
-                              if total > 0:
-                                  pct = (downloaded / total) * 100
-                                  print(f"\r  {downloaded/(1024*1024):.1f} MB / {total/(1024*1024):.1f} MB ({pct:.1f}%)", end="", flush=True)
-                  print("\nDownload complete!")
-              else:
-                  print("ERROR: Could not find download URL from gofile")
-                  print("The gofile API requires premium for direct downloads.")
-                  print("Please upload the firmware to a different service:")
-                  print("  - file.io")
-                  print("  - transfer.sh")
-                  print("  - Or split super.img into parts and upload as GitHub release assets")
-                  sys.exit(1)
-          else:
-              # Direct download URL
-              print(f"Direct download: {url}")
-              resp = requests.get(url, stream=True, allow_redirects=True)
-              with open("firmware_download", "wb") as f:
-                  for chunk in resp.iter_content(chunk_size=1024*1024):
-                      if chunk:
-                          f.write(chunk)
-              print("Download complete!")
-
-          # Verify
-          size = os.path.getsize("firmware_download")
-          print(f"File size: {size / (1024*1024):.1f} MB")
-          if size < 1024:
-              print("ERROR: File too small, download likely failed")
-              sys.exit(1)
-          SCRIPT
-
-          python3 download_gofile.py
-
-          echo "Downloaded file:"
-          ls -lh firmware_download
-          file firmware_download
-
-      - name: Extract Archive
-        run: |
-          cd firmware
-          if file firmware_download | grep -qi "zip"; then
-            echo "Extracting ZIP..."
-            unzip -o firmware_download
-            rm firmware_download
-          elif file firmware_download | grep -qi "rar"; then
-            echo "Extracting RAR..."
-            7z x firmware_download
-            rm firmware_download
-          elif file firmware_download | grep -qi "7z"; then
-            echo "Extracting 7z..."
-            7z x firmware_download
-            rm firmware_download
-          else
-            echo "Not an archive, assuming raw images..."
-            mv firmware_download super.img
-          fi
-
-          echo "=== Files in firmware directory ==="
-          find . -maxdepth 1 -type f -exec ls -lh {} \;
-
-          SUPER_IMG=$(find . -name "super.img" | head -1)
-          if [ -z "$SUPER_IMG" ]; then
-            echo "::error::super.img not found in firmware dump"
-            echo "Available files:"
-            find . -name "*.img" -exec ls -lh {} \;
-            exit 1
-          fi
-          echo "Found super.img at: $SUPER_IMG"
-
-      - name: Unpack Super Partition
-        run: |
-          mkdir -p super_out
-          SUPER_IMG=$(find firmware -name "super.img" | head -1)
-          echo "Converting super.img..."
-          simg2img "$SUPER_IMG" super_out/super_raw.img 2>/dev/null || cp "$SUPER_IMG" super_out/super_raw.img
-          echo "Unpacking super partition..."
-          cd super_out
-          lpunpack super_raw.img
-          rm super_raw.img
-          echo "=== Unpacked partitions ==="
+          mkdir -p images
+          cd images
+          
+          echo "Downloading partition images from GitHub Release..."
+          
+          for part in vendor_a odm_dlkm_a system_ext_a; do
+            echo "Downloading ${part}.img..."
+            gh release download firmware --pattern "${part}.img" --dir . || \
+            wget -q -O "${part}.img" "https://github.com/${{ github.repository }}/releases/download/firmware/${part}.img"
+            
+            if [ -f "${part}.img" ]; then
+              echo "  ${part}.img: $(ls -lh ${part}.img | awk '{print $5}')"
+            else
+              echo "  WARNING: ${part}.img not found"
+            fi
+          done
+          
+          echo "=== Downloaded files ==="
           ls -lh *.img
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Mount Partitions
         run: |
-          mkdir -p /mnt/vendor /mnt/odm /mnt/system /mnt/product /mnt/system_ext /mnt/vendor_dlkm
+          sudo mkdir -p /mnt/vendor /mnt/odm /mnt/vendor_dlkm /mnt/system_ext
 
-          for part in vendor odm vendor_dlkm; do
-            if [ -f super_out/$part.img ]; then
-              echo "Mounting $part (erofs)..."
-              sudo mount -t erofs -o ro,loop super_out/$part.img /mnt/$part 2>/dev/null || \
-              sudo mount -o ro,loop super_out/$part.img /mnt/$part
-              echo "$part contents:"
-              ls /mnt/$part | head -5
-            fi
-          done
-
-          for part in system product system_ext; do
-            if [ -f super_out/$part.img ]; then
-              echo "Mounting $part..."
-              sudo mount -t ext4 -o ro,loop super_out/$part.img /mnt/$part 2>/dev/null || \
-              sudo mount -o ro,loop super_out/$part.img /mnt/$part
-              echo "$part contents:"
-              ls /mnt/$part | head -5
+          for part_info in "vendor_a:/mnt/vendor" "vendor_dlkm_a:/mnt/vendor_dlkm" "system_ext_a:/mnt/system_ext"; do
+            part=$(echo $part_info | cut -d: -f1)
+            mnt=$(echo $part_info | cut -d: -f2)
+            
+            if [ -f images/${part}.img ]; then
+              echo "Mounting $part to $mnt..."
+              
+              sudo mount -t erofs -o ro,loop images/${part}.img $mnt 2>/dev/null
+              if [ $? -ne 0 ]; then
+                sudo mount -t ext4 -o ro,loop images/${part}.img $mnt 2>/dev/null
+              fi
+              if [ $? -ne 0 ]; then
+                sudo mount -o ro,loop images/${part}.img $mnt 2>/dev/null
+              fi
+              
+              echo "  $part contents:"
+              ls $mnt | head -10
             fi
           done
 
@@ -324,14 +96,16 @@ jobs:
           echo "Extracting blobs to $OUTDIR"
           echo "=========================================="
 
-          echo ">>> Extracting vendor/bin/hw/ ..."
+          # HAL binaries
+          echo ">>> vendor/bin/hw/ ..."
           if [ -d /mnt/vendor/bin/hw ]; then
             mkdir -p "$OUTDIR/bin/hw"
             cp -a /mnt/vendor/bin/hw/* "$OUTDIR/bin/hw/" 2>/dev/null
             echo "  HAL binaries: $(ls "$OUTDIR/bin/hw/" | wc -l)"
           fi
 
-          echo ">>> Extracting vendor/bin/ ..."
+          # Vendor binaries
+          echo ">>> vendor/bin/ ..."
           if [ -d /mnt/vendor/bin ]; then
             mkdir -p "$OUTDIR/bin"
             for bin in tee-supplicant miteelog mtkfusionrild fuelgauged fuelgauged_nvram; do
@@ -341,7 +115,8 @@ jobs:
             done
           fi
 
-          echo ">>> Extracting vendor/lib/ and vendor/lib64/ ..."
+          # All vendor libraries
+          echo ">>> vendor/lib/ and vendor/lib64/ ..."
           for libdir in lib lib64; do
             if [ -d /mnt/vendor/$libdir ]; then
               mkdir -p "$OUTDIR/$libdir"
@@ -350,20 +125,23 @@ jobs:
             fi
           done
 
-          echo ">>> Extracting vendor/etc/firmware/ ..."
+          # Firmware
+          echo ">>> vendor/etc/firmware/ ..."
           if [ -d /mnt/vendor/etc/firmware ]; then
             mkdir -p "$OUTDIR/etc/firmware"
             cp -a /mnt/vendor/etc/firmware/* "$OUTDIR/etc/firmware/" 2>/dev/null
-            echo "  Firmware files: $(ls "$OUTDIR/etc/firmware/" | wc -l)"
+            echo "  Firmware files: $(ls "$OUTDIR/etc/firmware/" 2>/dev/null | wc -l)"
           fi
 
-          echo ">>> Extracting vendor/etc/vintf/ ..."
+          # VINTF manifests
+          echo ">>> vendor/etc/vintf/ ..."
           if [ -d /mnt/vendor/etc/vintf ]; then
             mkdir -p "$OUTDIR/etc/vintf"
             cp -a /mnt/vendor/etc/vintf/* "$OUTDIR/etc/vintf/" 2>/dev/null
           fi
 
-          echo ">>> Extracting audio configs ..."
+          # Audio configs
+          echo ">>> Audio configs ..."
           for cfg in audio_device.xml audio_policy_configuration.xml audio_policy_volumes.xml; do
             if [ -f /mnt/vendor/etc/$cfg ]; then
               cp /mnt/vendor/etc/$cfg "$OUTDIR/etc/"
@@ -376,89 +154,76 @@ jobs:
             fi
           done
 
-          echo ">>> Extracting media configs ..."
+          # Media configs
+          echo ">>> Media configs ..."
           for cfg in media_codecs.xml media_codecs_mediatek_audio.xml media_codecs_mediatek_video.xml media_codecs_performance.xml media_profiles.xml; do
             if [ -f /mnt/vendor/etc/$cfg ]; then
               cp /mnt/vendor/etc/$cfg "$OUTDIR/etc/"
             fi
           done
 
-          echo ">>> Extracting sensor configs ..."
+          # Sensor configs
+          echo ">>> Sensor configs ..."
           for cfg in sensor_config.json sensorlist.txt; do
             if [ -f /mnt/vendor/etc/$cfg ]; then
               cp /mnt/vendor/etc/$cfg "$OUTDIR/etc/"
             fi
           done
 
-          echo ">>> Extracting GPS configs ..."
+          # GPS configs
+          echo ">>> GPS configs ..."
           for cfg in gps.conf gps_param.xml agps_profiles_conf2.xml; do
             if [ -f /mnt/vendor/etc/$cfg ]; then
               cp /mnt/vendor/etc/$cfg "$OUTDIR/etc/"
             fi
           done
 
-          echo ">>> Extracting thermal configs ..."
+          # Thermal configs
+          echo ">>> Thermal configs ..."
           for cfg in thermal_info_config.json thermaloffset.cfg; do
             if [ -f /mnt/vendor/etc/$cfg ]; then
               cp /mnt/vendor/etc/$cfg "$OUTDIR/etc/"
             fi
           done
 
-          echo ">>> Extracting WiFi configs ..."
+          # WiFi configs
+          echo ">>> WiFi configs ..."
           if [ -d /mnt/vendor/etc/wifi ]; then
             mkdir -p "$OUTDIR/etc/wifi"
             cp -a /mnt/vendor/etc/wifi/* "$OUTDIR/etc/wifi/" 2>/dev/null
           fi
 
-          echo ">>> Extracting vendor permissions ..."
+          # Permissions
+          echo ">>> Vendor permissions ..."
           if [ -d /mnt/vendor/etc/permissions ]; then
             mkdir -p "$OUTDIR/etc/permissions"
             cp -a /mnt/vendor/etc/permissions/* "$OUTDIR/etc/permissions/" 2>/dev/null
           fi
 
-          echo ">>> Extracting RIL configs ..."
+          # RIL configs
+          echo ">>> RIL configs ..."
           if [ -d /mnt/vendor/etc/ril ]; then
             mkdir -p "$OUTDIR/etc/ril"
             cp -a /mnt/vendor/etc/ril/* "$OUTDIR/etc/ril/" 2>/dev/null
           fi
 
-          echo ">>> Extracting TEE/MiTEE trusted apps ..."
+          # TEE/MiTEE
+          echo ">>> TEE/MiTEE trusted apps ..."
           if [ -d /mnt/vendor/mitee ]; then
             mkdir -p "$OUTDIR/mitee"
             cp -a /mnt/vendor/mitee/* "$OUTDIR/mitee/" 2>/dev/null
             echo "  TA files: $(find "$OUTDIR/mitee" -name "*.ta" | wc -l)"
           fi
 
-          echo ">>> Extracting camera configs ..."
+          # Camera configs
+          echo ">>> Camera configs ..."
           if [ -d /mnt/vendor/etc/camera ]; then
             mkdir -p "$OUTDIR/etc/camera"
             cp -a /mnt/vendor/etc/camera/* "$OUTDIR/etc/camera/" 2>/dev/null
           fi
 
-          echo ">>> Extracting ODM blobs ..."
-          if [ -d /mnt/odm ]; then
-            for libdir in lib lib64; do
-              if [ -d /mnt/odm/$libdir ]; then
-                mkdir -p "$OUTDIR/odm/$libdir"
-                find /mnt/odm/$libdir -name "*.so" -exec cp --parents {} "$OUTDIR/odm/" \; 2>/dev/null
-              fi
-            done
-            if [ -d /mnt/odm/bin/hw ]; then
-              mkdir -p "$OUTDIR/odm/bin/hw"
-              cp -a /mnt/odm/bin/hw/* "$OUTDIR/odm/bin/hw/" 2>/dev/null
-            fi
-            if [ -d /mnt/odm/etc/vintf ]; then
-              mkdir -p "$OUTDIR/odm/etc/vintf"
-              cp -a /mnt/odm/etc/vintf/* "$OUTDIR/odm/etc/vintf/" 2>/dev/null
-            fi
-            if [ -d /mnt/odm/etc ]; then
-              mkdir -p "$OUTDIR/odm/etc"
-              cp -a /mnt/odm/etc/*.xml "$OUTDIR/odm/etc/" 2>/dev/null
-              cp -a /mnt/odm/etc/*.json "$OUTDIR/odm/etc/" 2>/dev/null
-            fi
-          fi
-
-          echo ">>> Extracting vendor_dlkm kernel modules ..."
+          # vendor_dlkm kernel modules
+          echo ">>> vendor_dlkm kernel modules ..."
           if [ -d /mnt/vendor_dlkm ]; then
             mkdir -p "$OUTDIR/vendor_dlkm"
             find /mnt/vendor_dlkm -name "*.ko" -exec cp --parents {} "$OUTDIR/vendor_dlkm/" \; 2>/dev/null
@@ -467,7 +232,8 @@ jobs:
             find /mnt/vendor_dlkm -name "*.modules.load" -exec cp --parents {} "$OUTDIR/vendor_dlkm/" \; 2>/dev/null
           fi
 
-          echo ">>> Extracting system_ext blobs ..."
+          # system_ext blobs
+          echo ">>> system_ext blobs ..."
           if [ -d /mnt/system_ext ]; then
             for libdir in lib lib64; do
               if [ -d /mnt/system_ext/$libdir ]; then
@@ -481,12 +247,13 @@ jobs:
             fi
           fi
 
+          # Generate proprietary-files.txt
           echo ">>> Generating proprietary-files.txt ..."
           cd "vendor_blobs/$VENDOR/$DEVICE"
           find . -type f | sed 's|^\./||' | sort > ../../../proprietary-files.txt
           echo "Total blobs: $(wc -l < ../../../proprietary-files.txt)"
 
-          echo ">>> Generating vendor makefile ..."
+          # Generate vendor makefile
           {
             echo "# SPDX-FileCopyrightText: 2024 The LineageOS Project"
             echo "# SPDX-License-Identifier: Apache-2.0"
@@ -512,7 +279,7 @@ jobs:
       - name: Unmount Partitions
         if: always()
         run: |
-          for mnt in /mnt/vendor /mnt/odm /mnt/system /mnt/product /mnt/system_ext /mnt/vendor_dlkm; do
+          for mnt in /mnt/vendor /mnt/odm /mnt/vendor_dlkm /mnt/system_ext; do
             sudo umount $mnt 2>/dev/null || true
           done
 
@@ -555,7 +322,7 @@ jobs:
           body: |
             ## Vendor blobs for ${{ github.event.inputs.VENDOR_NAME }} ${{ github.event.inputs.DEVICE_PATH }}
 
-            Extracted from stock firmware via GitHub Actions.
+            Extracted from stock firmware partition images.
 
             ### Contents:
             - `vendor_${{ github.event.inputs.DEVICE_PATH }}.zip` — All vendor blobs

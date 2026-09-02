@@ -63,7 +63,7 @@ jobs:
 
       - name: Mount Partitions
         run: |
-          mkdir -p /mnt/vendor /mnt/odm /mnt/vendor_dlkm /mnt/system_ext
+          sudo mkdir -p /mnt/vendor /mnt/odm /mnt/vendor_dlkm /mnt/system_ext
 
           for part_info in "vendor_a:/mnt/vendor" "odm_a:/mnt/odm" "vendor_dlkm_a:/mnt/vendor_dlkm" "system_ext_a:/mnt/system_ext"; do
             part=$(echo $part_info | cut -d: -f1)

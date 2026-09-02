@@ -86,6 +86,7 @@ jobs:
 
       - name: Extract Blobs
         run: |
+          set +e
           DEVICE="${{ github.event.inputs.DEVICE_PATH }}"
           VENDOR="${{ github.event.inputs.VENDOR_NAME }}"
           OUTDIR="vendor_blobs/$VENDOR/$DEVICE"
@@ -101,7 +102,7 @@ jobs:
           if [ -d /mnt/vendor/bin/hw ]; then
             mkdir -p "$OUTDIR/bin/hw"
             cp -a /mnt/vendor/bin/hw/* "$OUTDIR/bin/hw/" 2>/dev/null
-            echo "  HAL binaries: $(ls "$OUTDIR/bin/hw/" | wc -l)"
+            echo "  HAL binaries: $(ls "$OUTDIR/bin/hw/" 2>/dev/null | wc -l)"
           fi
 
           # Vendor binaries
@@ -109,9 +110,7 @@ jobs:
           if [ -d /mnt/vendor/bin ]; then
             mkdir -p "$OUTDIR/bin"
             for bin in tee-supplicant miteelog mtkfusionrild fuelgauged fuelgauged_nvram; do
-              if [ -f /mnt/vendor/bin/$bin ]; then
-                cp /mnt/vendor/bin/$bin "$OUTDIR/bin/"
-              fi
+              cp /mnt/vendor/bin/$bin "$OUTDIR/bin/" 2>/dev/null
             done
           fi
 
@@ -121,7 +120,7 @@ jobs:
             if [ -d /mnt/vendor/$libdir ]; then
               mkdir -p "$OUTDIR/$libdir"
               find /mnt/vendor/$libdir -name "*.so" -exec cp --parents {} "$OUTDIR/" \; 2>/dev/null
-              echo "  $libdir: $(find "$OUTDIR/$libdir" -name "*.so" | wc -l) libraries"
+              echo "  $libdir: $(find "$OUTDIR/$libdir" -name "*.so" 2>/dev/null | wc -l) libraries"
             fi
           done
 

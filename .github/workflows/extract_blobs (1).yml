@@ -43,7 +43,7 @@ jobs:
           
           echo "Downloading partition images from GitHub Release..."
           
-          for part in vendor_a vendor_dlkm_a system_ext_a; do
+          for part in vendor_a odm_dlkm_a system_ext_a; do
             echo "Downloading ${part}.img..."
             gh release download firmware --pattern "${part}.img" --dir . || \
             wget -q -O "${part}.img" "https://github.com/${{ github.repository }}/releases/download/firmware/${part}.img"
@@ -64,7 +64,7 @@ jobs:
         run: |
           sudo mkdir -p /mnt/vendor /mnt/vendor_dlkm /mnt/system_ext
 
-          for part_info in "vendor_a:/mnt/vendor" "vendor_dlkm_a:/mnt/vendor_dlkm" "system_ext_a:/mnt/system_ext"; do
+          for part_info in "vendor_a:/mnt/vendor" "odm_dlkm_a:/mnt/vendor_dlkm" "system_ext_a:/mnt/system_ext"; do
             part=$(echo $part_info | cut -d: -f1)
             mnt=$(echo $part_info | cut -d: -f2)
             

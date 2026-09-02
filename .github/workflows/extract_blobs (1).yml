@@ -84,47 +84,6 @@ jobs:
             fi
           done
 
-      - name: Debug - List Mounted Partitions
-        run: |
-          echo "=== /mnt/vendor directory structure ==="
-          ls -la /mnt/vendor/ 2>/dev/null || echo "vendor not mounted"
-          echo ""
-          echo "=== /mnt/vendor/bin/ ==="
-          ls -la /mnt/vendor/bin/ 2>/dev/null || echo "no bin/"
-          echo ""
-          echo "=== /mnt/vendor/bin/hw/ ==="
-          ls -la /mnt/vendor/bin/hw/ 2>/dev/null || echo "no bin/hw/"
-          echo ""
-          echo "=== /mnt/vendor/etc/ (first 30) ==="
-          ls /mnt/vendor/etc/ 2>/dev/null | head -30 || echo "no etc/"
-          echo ""
-          echo "=== /mnt/vendor/etc/firmware/ (first 10) ==="
-          ls /mnt/vendor/etc/firmware/ 2>/dev/null | head -10 || echo "no etc/firmware/"
-          echo ""
-          echo "=== /mnt/vendor/firmware/ (first 10) ==="
-          ls /mnt/vendor/firmware/ 2>/dev/null | head -10 || echo "no firmware/"
-          echo ""
-          echo "=== /mnt/vendor/mitee/ ==="
-          ls -la /mnt/vendor/mitee/ 2>/dev/null || echo "no mitee/"
-          echo ""
-          echo "=== /mnt/vendor_dlkm/ ==="
-          ls -la /mnt/vendor_dlkm/ 2>/dev/null || echo "vendor_dlkm not mounted"
-          echo ""
-          echo "=== Find all .ko files in vendor ==="
-          find /mnt/vendor -name "*.ko" 2>/dev/null | head -10 || echo "no .ko files"
-          echo ""
-          echo "=== Find all .ta files ==="
-          find /mnt/vendor -name "*.ta" 2>/dev/null | head -10 || echo "no .ta files"
-          echo ""
-          echo "=== Find gatekeeper ==="
-          find /mnt/vendor -name "*gatekeeper*" 2>/dev/null | head -5
-          echo ""
-          echo "=== Find keymint ==="
-          find /mnt/vendor -name "*keymint*" 2>/dev/null | head -5
-          echo ""
-          echo "=== Find tee-supplicant ==="
-          find /mnt/vendor -name "*tee*" 2>/dev/null | head -5
-
       - name: Extract Blobs
         run: |
           set +e
@@ -138,148 +97,177 @@ jobs:
           echo "Extracting blobs to $OUTDIR"
           echo "=========================================="
 
-          # HAL binaries
-          echo ">>> vendor/bin/hw/ ..."
-          if [ -d /mnt/vendor/bin/hw ]; then
-            mkdir -p "$OUTDIR/bin/hw"
-            rsync -aL /mnt/vendor/bin/hw/ "$OUTDIR/bin/hw/" 2>/dev/null
-            echo "  HAL binaries: $(ls "$OUTDIR/bin/hw/" 2>/dev/null | wc -l)"
-          fi
-
-          # Vendor binaries
-          echo ">>> vendor/bin/ ..."
+          # HAL binaries - need sudo because bin/ has restricted permissions
+          echo ">>> vendor/bin/ (with sudo) ..."
           if [ -d /mnt/vendor/bin ]; then
             mkdir -p "$OUTDIR/bin"
-            for bin in tee-supplicant miteelog mtkfusionrild fuelgauged fuelgauged_nvram; do
-              cp -L /mnt/vendor/bin/$bin "$OUTDIR/bin/" 2>/dev/null
-            done
+            sudo rsync -aL /mnt/vendor/bin/ "$OUTDIR/bin/" 2>/dev/null
+            sudo chown -R runner:runner "$OUTDIR/bin/" 2>/dev/null
+            echo "  Binaries: $(find "$OUTDIR/bin" -type f 2>/dev/null | wc -l)"
+            echo "  HAL binaries in bin/hw/: $(ls "$OUTDIR/bin/hw/" 2>/dev/null | wc -l)"
           fi
 
-          # All vendor libraries - use rsync to handle symlinks properly
+          # Vendor libraries
           echo ">>> vendor/lib/ and vendor/lib64/ ..."
           for libdir in lib lib64; do
             if [ -d /mnt/vendor/$libdir ]; then
               mkdir -p "$OUTDIR/$libdir"
-              rsync -aL /mnt/vendor/$libdir/ "$OUTDIR/$libdir/" 2>/dev/null
+              sudo rsync -aL /mnt/vendor/$libdir/ "$OUTDIR/$libdir/" 2>/dev/null
+              sudo chown -R runner:runner "$OUTDIR/$libdir/" 2>/dev/null
               echo "  $libdir: $(find "$OUTDIR/$libdir" -name "*.so" 2>/dev/null | wc -l) libraries"
             fi
           done
 
-          # Firmware
+          # Firmware - Lava puts it in /firmware/ not /etc/firmware/
+          echo ">>> vendor/firmware/ ..."
+          if [ -d /mnt/vendor/firmware ]; then
+            mkdir -p "$OUTDIR/firmware"
+            sudo rsync -aL /mnt/vendor/firmware/ "$OUTDIR/firmware/" 2>/dev/null
+            sudo chown -R runner:runner "$OUTDIR/firmware/" 2>/dev/null
+            echo "  Firmware files: $(ls "$OUTDIR/firmware/" 2>/dev/null | wc -l)"
+          fi
+
+          # Also check etc/firmware just in case
           echo ">>> vendor/etc/firmware/ ..."
           if [ -d /mnt/vendor/etc/firmware ]; then
             mkdir -p "$OUTDIR/etc/firmware"
-            rsync -aL /mnt/vendor/etc/firmware/ "$OUTDIR/etc/firmware/" 2>/dev/null
-            echo "  Firmware files: $(ls "$OUTDIR/etc/firmware/" 2>/dev/null | wc -l)"
+            sudo rsync -aL /mnt/vendor/etc/firmware/ "$OUTDIR/etc/firmware/" 2>/dev/null
+            sudo chown -R runner:runner "$OUTDIR/etc/firmware/" 2>/dev/null
           fi
 
           # VINTF manifests
           echo ">>> vendor/etc/vintf/ ..."
           if [ -d /mnt/vendor/etc/vintf ]; then
             mkdir -p "$OUTDIR/etc/vintf"
-            rsync -aL /mnt/vendor/etc/vintf/ "$OUTDIR/etc/vintf/" 2>/dev/null
+            sudo rsync -aL /mnt/vendor/etc/vintf/ "$OUTDIR/etc/vintf/" 2>/dev/null
+            sudo chown -R runner:runner "$OUTDIR/etc/vintf/" 2>/dev/null
+          fi
+
+          # Init scripts
+          echo ">>> vendor/etc/init/ ..."
+          if [ -d /mnt/vendor/etc/init ]; then
+            mkdir -p "$OUTDIR/etc/init"
+            sudo rsync -aL /mnt/vendor/etc/init/ "$OUTDIR/etc/init/" 2>/dev/null
+            sudo chown -R runner:runner "$OUTDIR/etc/init/" 2>/dev/null
+            echo "  Init scripts: $(ls "$OUTDIR/etc/init/" 2>/dev/null | wc -l)"
           fi
 
           # Audio configs
           echo ">>> Audio configs ..."
-          for cfg in audio_device.xml audio_policy_configuration.xml audio_policy_volumes.xml; do
-            cp -L /mnt/vendor/etc/$cfg "$OUTDIR/etc/" 2>/dev/null
+          for cfg in audio_device.xml audio_policy_configuration.xml audio_policy_volumes.xml audio_effects.xml audio_policy.conf; do
+            sudo cp -L /mnt/vendor/etc/$cfg "$OUTDIR/etc/" 2>/dev/null
           done
-          for dir in audio_param params; do
+          for dir in audio_param params audio; do
             if [ -d /mnt/vendor/etc/$dir ]; then
               mkdir -p "$OUTDIR/etc/$dir"
-              rsync -aL /mnt/vendor/etc/$dir/ "$OUTDIR/etc/$dir/" 2>/dev/null
+              sudo rsync -aL /mnt/vendor/etc/$dir/ "$OUTDIR/etc/$dir/" 2>/dev/null
+              sudo chown -R runner:runner "$OUTDIR/etc/$dir/" 2>/dev/null
             fi
           done
 
           # Media configs
           echo ">>> Media configs ..."
           for cfg in media_codecs.xml media_codecs_mediatek_audio.xml media_codecs_mediatek_video.xml media_codecs_performance.xml media_profiles.xml; do
-            cp -L /mnt/vendor/etc/$cfg "$OUTDIR/etc/" 2>/dev/null
+            sudo cp -L /mnt/vendor/etc/$cfg "$OUTDIR/etc/" 2>/dev/null
           done
 
           # Sensor configs
           echo ">>> Sensor configs ..."
           for cfg in sensor_config.json sensorlist.txt; do
-            cp -L /mnt/vendor/etc/$cfg "$OUTDIR/etc/" 2>/dev/null
+            sudo cp -L /mnt/vendor/etc/$cfg "$OUTDIR/etc/" 2>/dev/null
           done
 
           # GPS configs
           echo ">>> GPS configs ..."
-          for cfg in gps.conf gps_param.xml agps_profiles_conf2.xml; do
-            cp -L /mnt/vendor/etc/$cfg "$OUTDIR/etc/" 2>/dev/null
+          for cfg in gps.conf gps_param.xml agps_profiles_conf2.xml MNL_Config.xml; do
+            sudo cp -L /mnt/vendor/etc/$cfg "$OUTDIR/etc/" 2>/dev/null
           done
 
           # Thermal configs
           echo ">>> Thermal configs ..."
           for cfg in thermal_info_config.json thermaloffset.cfg; do
-            cp -L /mnt/vendor/etc/$cfg "$OUTDIR/etc/" 2>/dev/null
+            sudo cp -L /mnt/vendor/etc/$cfg "$OUTDIR/etc/" 2>/dev/null
           done
 
           # WiFi configs
           echo ">>> WiFi configs ..."
           if [ -d /mnt/vendor/etc/wifi ]; then
             mkdir -p "$OUTDIR/etc/wifi"
-            rsync -aL /mnt/vendor/etc/wifi/ "$OUTDIR/etc/wifi/" 2>/dev/null
+            sudo rsync -aL /mnt/vendor/etc/wifi/ "$OUTDIR/etc/wifi/" 2>/dev/null
+            sudo chown -R runner:runner "$OUTDIR/etc/wifi/" 2>/dev/null
+          fi
+          # Also check etc/wpa (Lava uses wpa)
+          if [ -d /mnt/vendor/etc/wpa ]; then
+            mkdir -p "$OUTDIR/etc/wpa"
+            sudo rsync -aL /mnt/vendor/etc/wpa/ "$OUTDIR/etc/wpa/" 2>/dev/null
+            sudo chown -R runner:runner "$OUTDIR/etc/wpa/" 2>/dev/null
           fi
 
           # Permissions
           echo ">>> Vendor permissions ..."
           if [ -d /mnt/vendor/etc/permissions ]; then
             mkdir -p "$OUTDIR/etc/permissions"
-            rsync -aL /mnt/vendor/etc/permissions/ "$OUTDIR/etc/permissions/" 2>/dev/null
+            sudo rsync -aL /mnt/vendor/etc/permissions/ "$OUTDIR/etc/permissions/" 2>/dev/null
+            sudo chown -R runner:runner "$OUTDIR/etc/permissions/" 2>/dev/null
           fi
 
           # RIL configs
           echo ">>> RIL configs ..."
           if [ -d /mnt/vendor/etc/ril ]; then
             mkdir -p "$OUTDIR/etc/ril"
-            rsync -aL /mnt/vendor/etc/ril/ "$OUTDIR/etc/ril/" 2>/dev/null
-          fi
-
-          # TEE/MiTEE
-          echo ">>> TEE/MiTEE trusted apps ..."
-          if [ -d /mnt/vendor/mitee ]; then
-            mkdir -p "$OUTDIR/mitee"
-            rsync -aL /mnt/vendor/mitee/ "$OUTDIR/mitee/" 2>/dev/null
-            echo "  TA files: $(find "$OUTDIR/mitee" -name "*.ta" 2>/dev/null | wc -l)"
+            sudo rsync -aL /mnt/vendor/etc/ril/ "$OUTDIR/etc/ril/" 2>/dev/null
           fi
 
           # Camera configs
           echo ">>> Camera configs ..."
           if [ -d /mnt/vendor/etc/camera ]; then
             mkdir -p "$OUTDIR/etc/camera"
-            rsync -aL /mnt/vendor/etc/camera/ "$OUTDIR/etc/camera/" 2>/dev/null
+            sudo rsync -aL /mnt/vendor/etc/camera/ "$OUTDIR/etc/camera/" 2>/dev/null
+            sudo chown -R runner:runner "$OUTDIR/etc/camera/" 2>/dev/null
           fi
 
-          # vendor_dlkm kernel modules
-          echo ">>> vendor_dlkm kernel modules ..."
+          # TEE trusted apps - Lava uses TrustKernel, apps in /app/t6/
+          echo ">>> TEE trusted apps (app/t6/) ..."
+          if [ -d /mnt/vendor/app/t6 ]; then
+            mkdir -p "$OUTDIR/app/t6"
+            sudo rsync -aL /mnt/vendor/app/t6/ "$OUTDIR/app/t6/" 2>/dev/null
+            sudo chown -R runner:runner "$OUTDIR/app/t6/" 2>/dev/null
+            echo "  TA files: $(find "$OUTDIR/app/t6" -name "*.ta" 2>/dev/null | wc -l)"
+          fi
+
+          # vendor_dlkm
+          echo ">>> vendor_dlkm ..."
           if [ -d /mnt/vendor_dlkm ]; then
             mkdir -p "$OUTDIR/vendor_dlkm"
-            rsync -aL /mnt/vendor_dlkm/ "$OUTDIR/vendor_dlkm/" 2>/dev/null
+            sudo rsync -aL /mnt/vendor_dlkm/ "$OUTDIR/vendor_dlkm/" 2>/dev/null
+            sudo chown -R runner:runner "$OUTDIR/vendor_dlkm/" 2>/dev/null
             echo "  Kernel modules: $(find "$OUTDIR/vendor_dlkm" -name "*.ko" 2>/dev/null | wc -l)"
           fi
 
-          # system_ext blobs - fixed path
+          # system_ext blobs
           echo ">>> system_ext blobs ..."
           if [ -d /mnt/system_ext ]; then
-            if [ -d /mnt/system_ext/lib ]; then
-              mkdir -p "$OUTDIR/system_ext/lib"
-              rsync -aL /mnt/system_ext/lib/ "$OUTDIR/system_ext/lib/" 2>/dev/null
-            fi
-            if [ -d /mnt/system_ext/lib64 ]; then
-              mkdir -p "$OUTDIR/system_ext/lib64"
-              rsync -aL /mnt/system_ext/lib64/ "$OUTDIR/system_ext/lib64/" 2>/dev/null
-            fi
+            for libdir in lib lib64; do
+              if [ -d /mnt/system_ext/$libdir ]; then
+                mkdir -p "$OUTDIR/system_ext/$libdir"
+                sudo rsync -aL /mnt/system_ext/$libdir/ "$OUTDIR/system_ext/$libdir/" 2>/dev/null
+                sudo chown -R runner:runner "$OUTDIR/system_ext/$libdir/" 2>/dev/null
+              fi
+            done
             if [ -d /mnt/system_ext/etc ]; then
               mkdir -p "$OUTDIR/system_ext/etc"
-              rsync -aL /mnt/system_ext/etc/ "$OUTDIR/system_ext/etc/" 2>/dev/null
+              sudo rsync -aL /mnt/system_ext/etc/ "$OUTDIR/system_ext/etc/" 2>/dev/null
+              sudo chown -R runner:runner "$OUTDIR/system_ext/etc/" 2>/dev/null
             fi
           fi
 
-          # Clean up any mnt directories that leaked
+          # build.prop
+          echo ">>> build.prop ..."
+          sudo cp -L /mnt/vendor/build.prop "$OUTDIR/" 2>/dev/null
+          sudo chown runner:runner "$OUTDIR/build.prop" 2>/dev/null
+
+          # Clean up any mnt directories
           rm -rf "$OUTDIR/mnt" 2>/dev/null
-          rm -rf "$OUTDIR/system_ext/mnt" 2>/dev/null
 
           # Generate proprietary-files.txt
           echo ">>> Generating proprietary-files.txt ..."
@@ -307,8 +295,8 @@ jobs:
           find "$OUTDIR" -maxdepth 2 -type d | head -20
           echo ""
           echo "proprietary-files.txt entries: $(wc -l < ../../../proprietary-files.txt)"
-          echo "First 20 entries:"
-          head -20 ../../../proprietary-files.txt
+          echo "First 30 entries:"
+          head -30 ../../../proprietary-files.txt
 
       - name: Unmount Partitions
         if: always()

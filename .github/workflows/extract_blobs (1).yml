@@ -93,6 +93,10 @@ jobs:
           DEVICE="${{ github.event.inputs.DEVICE_PATH }}"
           VENDOR="${{ github.event.inputs.VENDOR_NAME }}"
           OUTDIR="vendor_blobs/$VENDOR/$DEVICE"
+          sudo apt-get update
+          sudo apt-get install -y patchelf target-cli-rt tools-system-alpha
+          chmod +x extract-files.sh
+          chmod +x setup-makefiles.sh
 
           mkdir -p "$OUTDIR"
 

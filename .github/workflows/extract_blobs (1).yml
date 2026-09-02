@@ -44,7 +44,7 @@ jobs:
           echo "Downloading partition images from GitHub Release..."
           
           # Download each partition from the 'firmware' release tag
-          for part in vendor_a odm_a vendor_dlkm_a system_ext_a; do
+          for part in vendor_a vendor_dlkm_a system_ext_a; do
             echo "Downloading ${part}.img..."
             gh release download firmware --pattern "${part}.img" --dir . || \
             wget -q -O "${part}.img" "https://github.com/${{ github.repository }}/releases/download/firmware/${part}.img"

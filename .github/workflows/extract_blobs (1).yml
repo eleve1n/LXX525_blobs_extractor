@@ -84,6 +84,47 @@ jobs:
             fi
           done
 
+      - name: Debug - List Mounted Partitions
+        run: |
+          echo "=== /mnt/vendor directory structure ==="
+          ls -la /mnt/vendor/ 2>/dev/null || echo "vendor not mounted"
+          echo ""
+          echo "=== /mnt/vendor/bin/ ==="
+          ls -la /mnt/vendor/bin/ 2>/dev/null || echo "no bin/"
+          echo ""
+          echo "=== /mnt/vendor/bin/hw/ ==="
+          ls -la /mnt/vendor/bin/hw/ 2>/dev/null || echo "no bin/hw/"
+          echo ""
+          echo "=== /mnt/vendor/etc/ (first 30) ==="
+          ls /mnt/vendor/etc/ 2>/dev/null | head -30 || echo "no etc/"
+          echo ""
+          echo "=== /mnt/vendor/etc/firmware/ (first 10) ==="
+          ls /mnt/vendor/etc/firmware/ 2>/dev/null | head -10 || echo "no etc/firmware/"
+          echo ""
+          echo "=== /mnt/vendor/firmware/ (first 10) ==="
+          ls /mnt/vendor/firmware/ 2>/dev/null | head -10 || echo "no firmware/"
+          echo ""
+          echo "=== /mnt/vendor/mitee/ ==="
+          ls -la /mnt/vendor/mitee/ 2>/dev/null || echo "no mitee/"
+          echo ""
+          echo "=== /mnt/vendor_dlkm/ ==="
+          ls -la /mnt/vendor_dlkm/ 2>/dev/null || echo "vendor_dlkm not mounted"
+          echo ""
+          echo "=== Find all .ko files in vendor ==="
+          find /mnt/vendor -name "*.ko" 2>/dev/null | head -10 || echo "no .ko files"
+          echo ""
+          echo "=== Find all .ta files ==="
+          find /mnt/vendor -name "*.ta" 2>/dev/null | head -10 || echo "no .ta files"
+          echo ""
+          echo "=== Find gatekeeper ==="
+          find /mnt/vendor -name "*gatekeeper*" 2>/dev/null | head -5
+          echo ""
+          echo "=== Find keymint ==="
+          find /mnt/vendor -name "*keymint*" 2>/dev/null | head -5
+          echo ""
+          echo "=== Find tee-supplicant ==="
+          find /mnt/vendor -name "*tee*" 2>/dev/null | head -5
+
       - name: Extract Blobs
         run: |
           set +e
